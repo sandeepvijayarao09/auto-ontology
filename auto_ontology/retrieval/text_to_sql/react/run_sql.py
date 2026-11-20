@@ -364,24 +364,138 @@ def check_query(ctx: ToolContext, connector: SQLDatabase, sql: str) -> CheckResu
     return CheckResult(tables_not_shown(check.statement, ctx, catalog), check.statement)
 
 
-def connector_for(ctx: ToolContext) -> SQLDatabase | None:
+_NO_DATABASE = "Error: no database to run on. Retrieve the tables you need first."
+
+
+def connector_for(ctx: ToolContext, sql: str | None = None) -> SQLDatabase | None:
     """The database the episode's SQL runs on.
 
     The target database when the caller named one; otherwise the connector that
-    owns the tables ``retrieve`` has shown, or the only one configured.
+    owns the tables *sql* names, or the tables ``retrieve`` has shown, or the
+    only one configured. See :func:`route_statement`.
+    """
+    return route_statement(ctx, sql)[0]
+
+
+def route_statement(
+    ctx: ToolContext, sql: str | None = None
+) -> tuple[SQLDatabase | None, str]:
+    """The connector *sql* runs on, or ``None`` and what the model should do.
+
+    With several databases and no target, the statement is routed by the
+    tables it names, not by everything the episode has seen: ``seen_tables``
+    only grows, so routing by it locks the episode out of every database once
+    one search has shown tables from two (#585). A statement still never runs
+    across databases (#179): one whose tables no single database holds is
+    refused, and so is one whose tables every database it could mean holds.
+    A statement that names no table the episode has seen falls back to
+    ``seen_tables``.
     """
     if ctx.database_name:
         for connector in ctx.connectors:
             if getattr(connector, "database_name", None) == ctx.database_name:
-                return connector
+                return connector, ""
     if len(ctx.connectors) == 1:
-        return ctx.connectors[0]
-    try:
-        return resolve_connector_from_tables(
-            list(ctx.seen_tables.values()), ctx.connectors
+        return ctx.connectors[0], ""
+
+    seen = list(ctx.seen_tables.values())
+    holders = _databases_holding(_statement_tables(sql), seen)
+    if holders:
+        candidates = set.intersection(*holders.values())
+        if len(candidates) == 1:
+            try:
+                connector = resolve_connector_from_tables(
+                    [{"database_name": next(iter(candidates))}], ctx.connectors
+                )
+            except ValueError:
+                connector = None
+            return connector, "" if connector is not None else _NO_DATABASE
+        if candidates:
+            return None, (
+                "Error: every table this query names is in more than one database "
+                f"({', '.join(sorted(candidates))}), so it could run on any of "
+                "them. Qualify the tables with their schema if that tells the "
+                "databases apart, or use tables only one of them has."
+            )
+        return None, (
+            "Error: this query names tables from more than one database "
+            f"({_tables_by_database(holders)}), and a query runs on one "
+            "database. Use tables from one of them only."
         )
+
+    try:
+        connector = resolve_connector_from_tables(seen, ctx.connectors)
     except ValueError:
-        return None
+        databases = sorted(
+            {str(t.get("database_name")) for t in seen if t.get("database_name")}
+        )
+        if len(databases) > 1:
+            return None, (
+                "Error: the tables retrieved so far come from more than one "
+                f"database ({', '.join(databases)}), and a query runs on one "
+                "database. Write it against tables from one of them only."
+            )
+        return None, _NO_DATABASE
+    return connector, "" if connector is not None else _NO_DATABASE
+
+
+def _statement_tables(sql: str | None) -> set[tuple[str | None, str]]:
+    """The ``(schema, name)`` of each table *sql* reads, lowercased.
+
+    CTE names are left out: they are not tables any database holds. Empty
+    when *sql* does not parse; the check that runs next reports that.
+    """
+    if not sql:
+        return set()
+    try:
+        statements = [s for s in sqlglot.parse(sql) if s is not None]
+    except sqlglot.errors.SqlglotError:
+        return set()
+    ctes = {
+        cte.alias_or_name.lower()
+        for statement in statements
+        for cte in statement.find_all(exp.CTE)
+    }
+    return {
+        ((table.db or "").lower() or None, table.name.lower())
+        for statement in statements
+        for table in statement.find_all(exp.Table)
+        if table.name and not (not table.db and table.name.lower() in ctes)
+    }
+
+
+def _databases_holding(
+    tables: set[tuple[str | None, str]], seen: list[dict[str, Any]]
+) -> dict[str, set[str]]:
+    """For each table in *tables* the episode has seen, the databases holding it.
+
+    Keyed by the table as the statement wrote it. A name without a schema
+    matches a seen table of that name in any schema.
+    """
+    holders: dict[str, set[str]] = {}
+    for schema, name in tables:
+        databases = {
+            str(t["database_name"])
+            for t in seen
+            if t.get("database_name")
+            and str(t.get("name") or "").lower() == name
+            and (schema is None or str(t.get("schema_name") or "").lower() == schema)
+        }
+        if databases:
+            holders[f"{schema}.{name}" if schema else name] = databases
+    return holders
+
+
+def _tables_by_database(holders: dict[str, set[str]]) -> str:
+    """``db: t1, t2; db2: t3`` for the refusal of a cross-database statement."""
+    by_database: dict[str, list[str]] = {}
+    for table, databases in holders.items():
+        for database in databases:
+            by_database.setdefault(database, []).append(table)
+    return "; ".join(
+        f"{database}: {', '.join(sorted(tables))}"
+        for database, tables in sorted(by_database.items())
+    )
 
 
 def _cell(value: Any) -> str:
@@ -427,9 +541,9 @@ def run_sql(ctx: ToolContext, sql: str) -> str:
             "Error: no exploratory run_sql calls left in this episode. Run your "
             "best query with final=true."
         )
-    connector = connector_for(ctx)
+    connector, problem = route_statement(ctx, sql)
     if connector is None:
-        return "Error: no database to run on. Retrieve the tables you need first."
+        return problem
     dialect = getattr(connector, "dialect", None)
     check = check_query(ctx, connector, sql)
     if check.problems:

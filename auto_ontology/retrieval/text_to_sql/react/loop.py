@@ -44,7 +44,7 @@ from auto_ontology.retrieval.text_to_sql.react.retrieve import retrieve
 from auto_ontology.utils.llm_invoke import invoke_with_retry
 from auto_ontology.retrieval.text_to_sql.react.run_sql import (
     check_query,
-    connector_for,
+    route_statement,
     run_sql,
 )
 
@@ -106,9 +106,9 @@ def submit(
                 None,
             )
         return "Accepted.", Submission("", response, assumptions, None)
-    connector = connector_for(ctx)
+    connector, problem = route_statement(ctx, sql)
     if connector is None:
-        return "Error: no database to run on. Retrieve the tables you need first.", None
+        return problem, None
     check = check_query(ctx, connector, sql)
     if check.problems:
         return "Not accepted. Fix these first:\n- " + "\n- ".join(check.problems), None
