@@ -58,6 +58,7 @@ from auto_ontology.dal.attributes import (
 from auto_ontology.dal.datasources import store_column_distinct_values
 from auto_ontology.dal.term_families import fetch_table_families
 from auto_ontology.infra.feature_flags import is_semantic_fk_db_query_prevented
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.fk_values import (
     MIN_CONTAINMENT,
     containment,
@@ -244,7 +245,11 @@ def _resolve_semantic_fks(database_name: str) -> int:
         families = _Families(fetch_table_families(database_name))
         inferred_written = 0
 
+        unreachable = threading.Event()
+
         def _resolve_one(index: int, col: dict[str, Any]) -> bool:
+            if unreachable.is_set():
+                return False
             _log_start(index, col)
             try:
                 attr_id = _resolve_via_vdb(
@@ -270,7 +275,13 @@ def _resolve_semantic_fks(database_name: str) -> int:
                         attr_id,
                     )
                     return True
-            except Exception:
+            except Exception as exc:
+                # A lost connection isn't about this column: stop the queued
+                # ones and fail the stage, rather than log one error per column
+                # and finish without the FKs (#553).
+                if is_postgres_unreachable(exc):
+                    unreachable.set()
+                    raise
                 logger.exception(
                     "resolve_semantic_fks [llm]: unexpected error for column %s",
                     col.get("id"),

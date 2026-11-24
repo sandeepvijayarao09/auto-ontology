@@ -15,6 +15,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from auto_ontology.dal.datasources import store_column_descriptions
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.date_format import is_date_type
 from auto_ontology.semantic.models import ColumnAttributeSpec, ColumnDescriptionResult
 from auto_ontology.utils.catalog_reembed import refresh_catalog_embeddings
@@ -253,7 +254,9 @@ def fill_missing_column_descriptions(
     if written_ids:
         try:
             refresh_catalog_embeddings([*written_ids, table_id])
-        except Exception:
+        except Exception as exc:
+            if is_postgres_unreachable(exc):
+                raise
             logger.warning(
                 "data VDB refresh after describing columns of table %s failed",
                 table_id,

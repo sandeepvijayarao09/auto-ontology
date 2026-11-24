@@ -32,6 +32,7 @@ from auto_ontology.dal.datasources import (
     store_column_uniqueness,
 )
 from auto_ontology.dal.pii import pii_tagged_column_ids
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.constants import SQL_ATTR_SOURCE_TABLE
 from auto_ontology.semantic.date_format import infer_date_format, is_date_type
 from auto_ontology.dal.terms import (
@@ -1083,7 +1084,9 @@ def process_table(
             for attr in attrs:
                 if attr.get("term_name"):
                     attrs_by_term[attr["term_name"]].append(attr)
-        except Exception:
+        except Exception as exc:
+            if is_postgres_unreachable(exc):
+                raise
             logger.warning("[%s] failed to fetch persisted terms", table_name)
 
         # The embedding reads sample_values from the catalog; without the PII
@@ -1097,7 +1100,9 @@ def process_table(
                 with _step(table_name, f"Embedding {len(terms)} term(s)"):
                     for term in terms:
                         embedder.embed_term(term, attrs_by_term.get(term["name"], []))
-            except Exception:
+            except Exception as exc:
+                if is_postgres_unreachable(exc):
+                    raise
                 logger.warning("[%s] inline embed failed", table_name)
 
     # The Term writes it serializes are complete, and

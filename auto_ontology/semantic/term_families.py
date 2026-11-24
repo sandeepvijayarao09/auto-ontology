@@ -47,6 +47,7 @@ from auto_ontology.dal.term_families import (
     replace_term_families,
 )
 from auto_ontology.dal.terms import fetch_terms_and_attributes_for_table
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.embed import SemanticEmbedder
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,9 @@ def _reembed_moved_tables(
             for attr in attrs:
                 embedder.vdb.delete_by_id(attr["id"])
             embedder.embed_column_attributes(attrs)
-        except Exception:
+        except Exception as exc:
+            if is_postgres_unreachable(exc):
+                raise
             logger.warning(
                 "re-embedding table %s after its family changed failed",
                 table_id,

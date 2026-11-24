@@ -26,6 +26,7 @@ from auto_ontology.dal.attributes import (
 )
 from auto_ontology.dal.datasources import fetch_table_by_id, fetch_table_context
 from auto_ontology.dal.terms import fetch_terms_and_attributes_for_table
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.cancellation import is_cancelled
 from auto_ontology.semantic.deterministic import (
     column_attribute_specs,
@@ -207,5 +208,7 @@ def _embed_table_terms(table: dict[str, Any], embedder: SemanticEmbedder) -> Non
                 embedder.vdb.delete_by_id(node["id"])
         if rows:
             write_embedded_rows(embedder.vdb, rows)
-    except Exception:
+    except Exception as exc:
+        if is_postgres_unreachable(exc):
+            raise
         logger.warning("[%s] re-embedding after attaching failed", table["name"])

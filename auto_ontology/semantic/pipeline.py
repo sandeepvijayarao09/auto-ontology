@@ -20,6 +20,7 @@ from auto_ontology.infra.feature_flags import (
     is_semantic_fk_db_query_prevented,
     is_table_sql_attribute_extraction_enabled,
 )
+from auto_ontology.infra.postgres import is_postgres_unreachable
 from auto_ontology.semantic.cancellation import is_cancelled
 from auto_ontology.semantic.domain import DomainSummary, load_domain_summary
 from auto_ontology.semantic.embed import SemanticEmbedder
@@ -174,6 +175,7 @@ def compile_semantic_layer(
     # Set the first time a table is dropped, so the "we are cancelling" line is
     # logged once rather than once per table.
     cancel_logged = threading.Event()
+    unreachable = threading.Event()
 
     def _process(
         table: dict, position: int, display_index: int
@@ -194,6 +196,11 @@ def compile_semantic_layer(
                     "waiting for the up-to-%d already running to finish",
                     _WORKERS,
                 )
+            commit_slot.skip_if_unused()
+            return None
+        if unreachable.is_set():
+            # Another table couldn't reach Postgres and the build is failing;
+            # this one would fail the same way after its LLM calls.
             commit_slot.skip_if_unused()
             return None
         try:
@@ -220,7 +227,12 @@ def compile_semantic_layer(
                 extract_table_sql_attributes=is_extract_table_sql_attributes,
                 commit_slot=commit_slot,
             )
-        except Exception:
+        except Exception as exc:
+            # Not about this table: every table after it would fail the same
+            # way, so fail the build rather than finish it damaged (#553).
+            if is_postgres_unreachable(exc):
+                unreachable.set()
+                raise
             logger.exception("Unexpected error processing table %s", table_name)
             return None
         finally:
